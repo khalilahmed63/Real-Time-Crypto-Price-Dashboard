@@ -25,10 +25,37 @@ export function formatPercent(value: number): string {
   return `${sign}${value.toFixed(2)}%`;
 }
 
-export function formatChartTime(ts: number): string {
+export type ChartLabelGranularity = "second" | "minute" | "hour" | "day" | "week";
+
+export function formatChartTime(
+  ts: number,
+  granularity: ChartLabelGranularity = "second"
+): string {
+  const date = new Date(ts);
+  if (granularity === "day" || granularity === "week") {
+    return new Intl.DateTimeFormat("en-US", {
+      month: "short",
+      day: "2-digit",
+      year: "2-digit",
+    }).format(date);
+  }
+  if (granularity === "hour") {
+    return new Intl.DateTimeFormat("en-US", {
+      month: "short",
+      day: "2-digit",
+      hour: "2-digit",
+      minute: "2-digit",
+    }).format(date);
+  }
+  if (granularity === "minute") {
+    return new Intl.DateTimeFormat("en-US", {
+      hour: "2-digit",
+      minute: "2-digit",
+    }).format(date);
+  }
   return new Intl.DateTimeFormat("en-US", {
     hour: "2-digit",
     minute: "2-digit",
     second: "2-digit",
-  }).format(new Date(ts));
+  }).format(date);
 }

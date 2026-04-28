@@ -11,6 +11,7 @@ import {
   YAxis,
 } from "recharts";
 import type { PricePoint } from "@/lib/api";
+import { formatChartTime, type ChartLabelGranularity } from "@/lib/format";
 
 type ChartProps = {
   data: PricePoint[];
@@ -33,10 +34,18 @@ function ChartInner({
   tooltipFormatter,
   emptyText = "Waiting for price samples…",
 }: ChartProps) {
-  const chartData = useMemo(
-    () => data.map((d) => ({ ...d, t: d.label })),
-    [data]
-  );
+  const chartData = useMemo(() => data.map((d) => ({ ...d, t: d.time })), [data]);
+  const labelMode = useMemo<ChartLabelGranularity>(() => {
+    if (chartData.length < 2) return "second";
+    const first = chartData[0]?.t ?? 0;
+    const last = chartData[chartData.length - 1]?.t ?? 0;
+    const spanMs = Math.max(0, last - first);
+    if (spanMs >= 1000 * 60 * 60 * 24 * 7) return "week";
+    if (spanMs >= 1000 * 60 * 60 * 24) return "day";
+    if (spanMs >= 1000 * 60 * 60) return "hour";
+    if (spanMs >= 1000 * 60) return "minute";
+    return "second";
+  }, [chartData]);
 
   if (chartData.length === 0) {
     return (
@@ -65,6 +74,9 @@ function ChartInner({
             axisLine={false}
             tickLine={false}
             minTickGap={24}
+            tickFormatter={(v) =>
+              typeof v === "number" ? formatChartTime(v, labelMode) : String(v)
+            }
           />
           <YAxis
             domain={["auto", "auto"]}
@@ -88,6 +100,11 @@ function ChartInner({
               color: "#fafafa",
             }}
             labelStyle={{ color: "#a1a1aa" }}
+            labelFormatter={(label) =>
+              typeof label === "number"
+                ? formatChartTime(label, labelMode)
+                : String(label)
+            }
             formatter={(value) => {
               const v = value as number | string | undefined;
               const text =

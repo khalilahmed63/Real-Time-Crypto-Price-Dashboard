@@ -1,7 +1,11 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
-import { type NormalizedMarket, type PricePoint } from "@/lib/api";
+import {
+  type CandlePoint,
+  type NormalizedMarket,
+  type PricePoint,
+} from "@/lib/api";
 import { formatChartTime } from "@/lib/format";
 import {
   BINANCE_STREAM_SYMBOLS,
@@ -9,7 +13,6 @@ import {
 } from "@/lib/tokens";
 
 export const POLL_INTERVAL_MS = 5000;
-export const MAX_HISTORY_POINTS = 24;
 const HISTORY_WINDOW_MS = 12 * 60 * 60 * 1000;
 
 export type ChartTimeframe = "live" | "1m" | "5m" | "15m";
@@ -23,13 +26,38 @@ const TIMEFRAME_MS: Record<Exclude<ChartTimeframe, "live">, number> = {
 const BINANCE_CHART_THROTTLE_MS = 2000;
 const BINANCE_WS_CHART_THROTTLE_MS = 5000;
 const WS_RETRY_DELAYS_MS = [1000, 2000, 5000, 10000];
-const BINANCE_REST_BASE = "https://api.binance.com/api/v3";
-const PRELOAD_INTERVAL = "30m";
+const BINANCE_REST_BASES = [
+  "https://api.binance.com/api/v3",
+  "https://data-api.binance.vision/api/v3",
+];
+export type CandleRange = "1min" | "1h" | "4h" | "1d" | "1w" | "1mo" | "1y";
+
+const CANDLE_RANGE_CONFIG: Record<
+  CandleRange,
+  { interval: string; intervalMs: number; limit: number }
+> = {
+  "1min": { interval: "1m", intervalMs: 60_000, limit: 60 },
+  "1h": { interval: "1m", intervalMs: 60_000, limit: 60 },
+  "4h": { interval: "5m", intervalMs: 300_000, limit: 48 },
+  "1d": { interval: "30m", intervalMs: 1_800_000, limit: 48 },
+  "1w": { interval: "4h", intervalMs: 14_400_000, limit: 42 },
+  "1mo": { interval: "1d", intervalMs: 86_400_000, limit: 30 },
+  "1y": { interval: "1w", intervalMs: 604_800_000, limit: 52 },
+};
+
+function candleLabelGranularity(intervalMs: number) {
+  if (intervalMs >= 604_800_000) return "week" as const;
+  if (intervalMs >= 86_400_000) return "day" as const;
+  if (intervalMs >= 3_600_000) return "hour" as const;
+  if (intervalMs >= 60_000) return "minute" as const;
+  return "second" as const;
+}
 
 export type UseCryptoPriceOptions = {
   /** Binance trade stream for smoother price + chart updates (USDT pairs). */
   binanceStream?: boolean;
   timeframe?: ChartTimeframe;
+  candleRange?: CandleRange;
 };
 
 export type UseCryptoPriceResult = {
@@ -40,6 +68,7 @@ export type UseCryptoPriceResult = {
   name: string | null;
   history: PricePoint[];
   wsHistory: PricePoint[];
+  candleHistory: CandlePoint[];
   wsConnected: boolean;
   loading: boolean;
   error: string | null;
@@ -59,11 +88,14 @@ export function useCryptoPrice(
   token: CryptoToken,
   options: UseCryptoPriceOptions = {}
 ): UseCryptoPriceResult {
-  const { binanceStream = true, timeframe = "live" } = options;
+  const { binanceStream = true, timeframe = "live", candleRange = "1d" } = options;
+  const candleCfg = CANDLE_RANGE_CONFIG[candleRange];
+  const candleLabelMode = candleLabelGranularity(candleCfg.intervalMs);
 
   const [meta] = useState<NormalizedMarket | null>(null);
   const [history, setHistory] = useState<PricePoint[]>([]);
   const [wsHistory, setWsHistory] = useState<PricePoint[]>([]);
+  const [candleHistory, setCandleHistory] = useState<CandlePoint[]>([]);
   const [wsConnected, setWsConnected] = useState(false);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -112,24 +144,29 @@ export function useCryptoPrice(
     let cancelled = false;
     const symbol = BINANCE_STREAM_SYMBOLS[token].toUpperCase();
 
-    async function preload12hHistory() {
+    async function preloadCandleHistory() {
       try {
         const params = new URLSearchParams({
           symbol,
-          interval: PRELOAD_INTERVAL,
-          limit: String(MAX_HISTORY_POINTS),
+          interval: candleCfg.interval,
+          limit: String(candleCfg.limit),
         });
-        const res = await fetch(
-          `${BINANCE_REST_BASE}/klines?${params.toString()}`,
-          {
+        let rows: Array<[number, string, string, string, string, string, number]> =
+          [];
+        for (const base of BINANCE_REST_BASES) {
+          const res = await fetch(`${base}/klines?${params.toString()}`, {
             cache: "no-store",
             headers: { Accept: "application/json" },
+          });
+          if (!res.ok) continue;
+          const json = (await res.json()) as Array<
+            [number, string, string, string, string, string, number]
+          >;
+          if (Array.isArray(json) && json.length > 0) {
+            rows = json;
+            break;
           }
-        );
-        if (!res.ok) return;
-        const rows = (await res.json()) as Array<
-          [number, string, string, string, string, string, number]
-        >;
+        }
         if (cancelled || !Array.isArray(rows) || rows.length === 0) return;
 
         const points = rows
@@ -143,8 +180,30 @@ export function useCryptoPrice(
           .filter((p): p is PricePoint => p !== null);
 
         if (points.length === 0) return;
+        const candles = rows
+          .map((row) => {
+            const openTime = row[0];
+            const open = Number.parseFloat(row[1]);
+            const high = Number.parseFloat(row[2]);
+            const low = Number.parseFloat(row[3]);
+            const close = Number.parseFloat(row[4]);
+            if (![openTime, open, high, low, close].every(Number.isFinite)) {
+              return null;
+            }
+            return {
+              time: openTime,
+              label: formatChartTime(openTime, candleLabelMode),
+              open,
+              high,
+              low,
+              close,
+            } satisfies CandlePoint;
+          })
+          .filter((c): c is CandlePoint => c !== null);
+
         setHistory(points);
         setWsHistory(points);
+        setCandleHistory(candles);
         historyRef.current = points;
         lastBucketPushRef.current = points[points.length - 1]?.time ?? 0;
         lastWsChartRef.current = points[points.length - 1]?.time ?? 0;
@@ -154,11 +213,11 @@ export function useCryptoPrice(
       }
     }
 
-    preload12hHistory();
+    preloadCandleHistory();
     return () => {
       cancelled = true;
     };
-  }, [token]);
+  }, [token, candleCfg.interval, candleCfg.limit]);
 
   useEffect(() => {
     if (!binanceStream) return;
@@ -211,6 +270,37 @@ export function useCryptoPrice(
           setLoading(false);
           setError(null);
           const now = Date.now();
+          const bucket =
+            Math.floor(now / candleCfg.intervalMs) * candleCfg.intervalMs;
+          setCandleHistory((prev) => {
+            const within = prev.filter(
+              (c) => now - c.time <= candleCfg.intervalMs * candleCfg.limit
+            );
+            const last = within[within.length - 1];
+            if (!last || last.time !== bucket) {
+              return [
+                ...within,
+                {
+                  time: bucket,
+                  label: formatChartTime(bucket, candleLabelMode),
+                  open: p,
+                  high: p,
+                  low: p,
+                  close: p,
+                },
+              ];
+            }
+            const next = [...within];
+            next[next.length - 1] = {
+              ...last,
+              // Keep the active candle visually aligned with live time.
+              label: formatChartTime(now, candleLabelMode),
+              high: Math.max(last.high, p),
+              low: Math.min(last.low, p),
+              close: p,
+            };
+            return next;
+          });
           if (now - lastWsChartRef.current >= BINANCE_WS_CHART_THROTTLE_MS) {
             lastWsChartRef.current = now;
             pushWsPoint(p, now);
@@ -252,7 +342,17 @@ export function useCryptoPrice(
       setWsConnected(false);
       ws?.close();
     };
-  }, [binanceStream, token, pushPoint, pushWsPoint, tryPushBucketed, timeframe]);
+  }, [
+    binanceStream,
+    token,
+    pushPoint,
+    pushWsPoint,
+    tryPushBucketed,
+    timeframe,
+    candleCfg.intervalMs,
+    candleCfg.limit,
+    candleLabelMode,
+  ]);
 
   const price =
     binanceStream && wsPrice != null
@@ -269,6 +369,7 @@ export function useCryptoPrice(
     name: meta?.name ?? null,
     history,
     wsHistory,
+    candleHistory,
     wsConnected,
     loading,
     error,

@@ -9,7 +9,8 @@ import {
 } from "@/lib/tokens";
 
 export const POLL_INTERVAL_MS = 5000;
-export const MAX_HISTORY_POINTS = 20;
+export const MAX_HISTORY_POINTS = 24;
+const HISTORY_WINDOW_MS = 12 * 60 * 60 * 1000;
 
 export type ChartTimeframe = "live" | "1m" | "5m" | "15m";
 
@@ -20,7 +21,10 @@ const TIMEFRAME_MS: Record<Exclude<ChartTimeframe, "live">, number> = {
 };
 
 const BINANCE_CHART_THROTTLE_MS = 2000;
+const BINANCE_WS_CHART_THROTTLE_MS = 5000;
 const WS_RETRY_DELAYS_MS = [1000, 2000, 5000, 10000];
+const BINANCE_REST_BASE = "https://api.binance.com/api/v3";
+const PRELOAD_INTERVAL = "30m";
 
 export type UseCryptoPriceOptions = {
   /** Binance trade stream for smoother price + chart updates (USDT pairs). */
@@ -67,11 +71,14 @@ export function useCryptoPrice(
 
   const lastBucketPushRef = useRef(0);
   const lastBinanceChartRef = useRef(0);
+  const lastWsChartRef = useRef(0);
   const historyRef = useRef<PricePoint[]>([]);
 
   const pushPoint = useCallback((price: number, time: number) => {
     setHistory((prev) => {
-      const next = [...prev, makePoint(price, time)].slice(-MAX_HISTORY_POINTS);
+      const next = [...prev, makePoint(price, time)].filter(
+        (point) => time - point.time <= HISTORY_WINDOW_MS
+      );
       historyRef.current = next;
       return next;
     });
@@ -79,7 +86,9 @@ export function useCryptoPrice(
 
   const pushWsPoint = useCallback((price: number, time: number) => {
     setWsHistory((prev) =>
-      [...prev, makePoint(price, time)].slice(-MAX_HISTORY_POINTS)
+      [...prev, makePoint(price, time)].filter(
+        (point) => time - point.time <= HISTORY_WINDOW_MS
+      )
     );
   }, []);
 
@@ -98,6 +107,58 @@ export function useCryptoPrice(
     },
     [pushPoint, timeframe]
   );
+
+  useEffect(() => {
+    let cancelled = false;
+    const symbol = BINANCE_STREAM_SYMBOLS[token].toUpperCase();
+
+    async function preload12hHistory() {
+      try {
+        const params = new URLSearchParams({
+          symbol,
+          interval: PRELOAD_INTERVAL,
+          limit: String(MAX_HISTORY_POINTS),
+        });
+        const res = await fetch(
+          `${BINANCE_REST_BASE}/klines?${params.toString()}`,
+          {
+            cache: "no-store",
+            headers: { Accept: "application/json" },
+          }
+        );
+        if (!res.ok) return;
+        const rows = (await res.json()) as Array<
+          [number, string, string, string, string, string, number]
+        >;
+        if (cancelled || !Array.isArray(rows) || rows.length === 0) return;
+
+        const points = rows
+          .map((row) => {
+            const openTime = row[0];
+            const closePrice = Number.parseFloat(row[4]);
+            return Number.isFinite(openTime) && Number.isFinite(closePrice)
+              ? makePoint(closePrice, openTime)
+              : null;
+          })
+          .filter((p): p is PricePoint => p !== null);
+
+        if (points.length === 0) return;
+        setHistory(points);
+        setWsHistory(points);
+        historyRef.current = points;
+        lastBucketPushRef.current = points[points.length - 1]?.time ?? 0;
+        lastWsChartRef.current = points[points.length - 1]?.time ?? 0;
+        setLoading(false);
+      } catch {
+        /* best effort preload; realtime stream still runs */
+      }
+    }
+
+    preload12hHistory();
+    return () => {
+      cancelled = true;
+    };
+  }, [token]);
 
   useEffect(() => {
     if (!binanceStream) return;
@@ -150,7 +211,10 @@ export function useCryptoPrice(
           setLoading(false);
           setError(null);
           const now = Date.now();
-          pushWsPoint(p, now);
+          if (now - lastWsChartRef.current >= BINANCE_WS_CHART_THROTTLE_MS) {
+            lastWsChartRef.current = now;
+            pushWsPoint(p, now);
+          }
           if (timeframe === "live") {
             if (now - lastBinanceChartRef.current >= BINANCE_CHART_THROTTLE_MS) {
               lastBinanceChartRef.current = now;

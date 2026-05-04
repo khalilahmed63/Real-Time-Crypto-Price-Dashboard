@@ -1,9 +1,7 @@
 "use client";
 
 import { memo } from "react";
-import type { CryptoToken } from "@/lib/tokens";
-
-const TOKENS: CryptoToken[] = ["BTC", "ETH", "USDC"];
+import { CRYPTO_TOKEN_ORDER, type CryptoToken } from "@/lib/tokens";
 
 type TokenSelectorProps = {
   value: CryptoToken;
@@ -18,11 +16,11 @@ function TokenSelectorInner({
 }: TokenSelectorProps) {
   return (
     <div
-      className="inline-flex rounded-xl border border-white/10 bg-white/5 p-1 shadow-inner backdrop-blur-md"
+      className="inline-flex max-w-full flex-wrap justify-center gap-1 rounded-xl border border-white/10 bg-white/5 p-1 shadow-inner backdrop-blur-md sm:justify-start"
       role="tablist"
       aria-label="Select asset"
     >
-      {TOKENS.map((t) => {
+      {CRYPTO_TOKEN_ORDER.map((t) => {
         const active = t === value;
         return (
           <button
@@ -33,7 +31,7 @@ function TokenSelectorInner({
             disabled={disabled}
             onClick={() => onChange(t)}
             className={[
-              "relative min-w-[4.5rem] rounded-lg px-4 py-2 text-sm font-medium transition-all duration-200",
+              "relative min-w-13 rounded-lg px-2.5 py-2 text-xs font-medium transition-all duration-200 sm:min-w-16 sm:px-3 sm:text-sm",
               active
                 ? "bg-white/15 text-white shadow-sm"
                 : "text-zinc-400 hover:text-zinc-200",

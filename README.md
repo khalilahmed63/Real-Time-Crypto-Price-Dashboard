@@ -4,6 +4,11 @@ A production-style crypto dashboard built with Next.js App Router, TypeScript, T
 
 It streams live prices directly from Binance WebSocket and renders a modern responsive chart UI.
 
+## Preview
+
+![Dashboard Preview](./public/1.png)
+![Dashboard Preview](./public/2.png)
+
 ## Tech Stack
 
 - Next.js (App Router)
